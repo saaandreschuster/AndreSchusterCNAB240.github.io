@@ -82,6 +82,14 @@
   .mode-hint{padding:10px 12px;border-radius:9px;font-size:12.5px;margin-bottom:14px;
     background:var(--amber-bg);border:1px solid #e6cf95;color:#7a5a12}
   .mode-hint.tip{background:#eaeefc;border-color:#cdd6f5;color:#31407e}
+  /* aviso de banco não implementado (layout genérico FEBRABAN) */
+  .bank-prompt{padding:13px 15px;border-radius:11px;margin-bottom:14px;font-size:13px;
+    background:var(--amber-bg);border:1px solid #e6cf95;color:#6d5212}
+  .bank-prompt.on{background:#eaeefc;border-color:#cdd6f5;color:#31407e}
+  .bank-prompt b{color:inherit}
+  .bp-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+  .bp-actions button{padding:7px 14px;font-size:12.5px}
+  .bank-prompt .lnk{background:none;border:0;color:#31407e;text-decoration:underline;cursor:pointer;padding:0;font-weight:700;font-size:12.5px}
   .scrim{position:fixed;inset:0;background:rgba(20,28,24,.4);z-index:55;opacity:0;pointer-events:none;transition:opacity .25s}
   .scrim.open{opacity:1;pointer-events:auto}
 
@@ -298,6 +306,7 @@
     <div><b id="mbTitle">Inspecionar CNAB 240</b><span id="mbSub">Conferência de arquivo de remessa — campos, leiautes e validações (detecção automática de banco).</span></div>
   </div>
   <div id="modeHint"></div>
+  <div id="bankPrompt"></div>
   <div class="loader" id="dropZone">
     <textarea id="input" class="mono" spellcheck="false" placeholder="Cole aqui o conteúdo de um arquivo .REM (240 colunas por linha)… ou arraste e solte o arquivo aqui."></textarea>
     <div class="btns">
@@ -1236,19 +1245,22 @@ let LOTE_VER = LOTE_VER_SICREDI;
 let ISSUES=[];
 function validateAll(D){
   const iss=D.map(()=>({fields:{},rec:[]}));
+  // Banco não implementado: só exibe pelo layout genérico; valida apenas se o usuário optar.
+  if(GENERIC_MODE && !USE_GENERIC_VALIDATION) return iss;
   const addF=(i,de,ate,sev,msg)=>{const k=de+'-'+ate;if(!iss[i].fields[k]||sev==='error')iss[i].fields[k]={sev,msg,de,ate};};
   function checkDoc(i,L,tp,de,ate){const t=slice(L,tp,tp),doc=slice(L,de,ate);
     if(t==='1'&&!valCPF(doc))addF(i,de,ate,'error','CPF com dígito verificador inválido.');
     else if(t==='2'&&!valCNPJ(doc))addF(i,de,ate,'error','CNPJ com dígito verificador inválido.');}
 
-  const banco = activeBankCode;
+  const banco = GENERIC_MODE ? FILE_BANK_CODE : activeBankCode;
   const helpers = {addF, checkDoc};
 
   // ---- checagens genéricas de campo (todos os bancos) ----
   D.forEach((r,i)=>{
     const L=r.line;
     if(r.len!==240) iss[i].rec.push({sev:'error',msg:'Registro com '+r.len+' bytes (esperado 240).'});
-    if(slice(L,1,3)!==banco) addF(i,1,3,'error','Código do banco deve ser '+banco+'.');
+    if(banco && /^\d{3}$/.test(banco) && slice(L,1,3)!==banco)
+      addF(i,1,3,'error','Código do banco deve ser '+banco+(GENERIC_MODE?' (igual ao Header de Arquivo).':'.'));
     const lay=LAYOUTS[r.key];
     if(lay) lay.fields.forEach(f=>{
       const raw=slice(L,f.de,f.ate);
@@ -1925,6 +1937,9 @@ let activeBankCode = '748';
    ===================================================================== */
 
 const DEFAULT_BANK = '748';
+let GENERIC_MODE = false;            // banco não implementado → exibe pelo layout genérico FEBRABAN
+let FILE_BANK_CODE = null;           // código do banco lido do arquivo (posições 1-3)
+let USE_GENERIC_VALIDATION = false;  // usuário optou por validar pelo manual FEBRABAN genérico
 
 // soma o valor de pagamento de um registro de detalhe usando a config do banco
 function bankSumOf(bank, r){
@@ -2000,6 +2015,24 @@ const BANKS = {
       if(['N','N1','N2','N3','N4','N8'].includes(r.key)) return [96,110];
       return null;
     }
+  },
+
+  // ---------------- FEBRABAN (genérico) — usado p/ bancos NÃO implementados ----------------
+  'FEBRABAN':{
+    nome:'FEBRABAN (genérico)', logo:'FB', sub:'Layout padrão FEBRABAN CNAB 240',
+    D:D_FEBRABAN, LAYOUTS:LAYOUTS_FALLBACK, LOTE_VER:{},
+    headerLoteKeys:['1'], trailerLoteKeys:['5'],
+    versionField:[164,166], versionExpected:'',
+    recordKey: recordKeyFebraban,
+    rules: rulesFebraban,
+    genericAnyBank:true,            // não força um código de banco específico
+    valueField: r => {
+      if(r.key==='A') return [120,134];
+      if(r.key==='J') return [153,167];
+      if(r.key==='O') return [108,122];
+      if(['N','N1','N2','N3'].includes(r.key)) return [96,110];
+      return null;
+    }
   }
 
   /* ---------------------------------------------------------------
@@ -2031,12 +2064,15 @@ function detectBank(lines){
   return (lines[0]||'').substring(0,3) || DEFAULT_BANK;
 }
 function setActiveBank(code){
-  const known = !!BANKS[code];
-  const b = BANKS[code] || BANKS[DEFAULT_BANK];
-  activeBankCode = known?code:DEFAULT_BANK;
+  const known = !!BANKS[code] && code!=='FEBRABAN';
+  GENERIC_MODE = !known;
+  FILE_BANK_CODE = code;
+  const b = known ? BANKS[code] : BANKS['FEBRABAN'];
+  activeBankCode = known ? code : 'FEBRABAN';
   D = b.D; LAYOUTS = b.LAYOUTS; LOTE_VER = b.LOTE_VER || {};
   document.getElementById('bankLogo').textContent = b.logo;
-  document.getElementById('bankSub').textContent = (known?'':'(banco '+code+' não mapeado — usando ')+b.sub+(known?'':')');
+  document.getElementById('bankSub').textContent = known ? b.sub
+    : ('banco '+esc(code)+' não implementado — layout genérico FEBRABAN');
 }
 
 function render(lines){
@@ -2073,6 +2109,7 @@ function render(lines){
   root.innerHTML = DATA.map(renderRecord).join('');
   refreshValidationUI();
   setModeHint(cfg,fileRet);
+  setBankPrompt();
 }
 function renderSummary(){
   const total=DATA.length;
@@ -2530,6 +2567,7 @@ function parseFromTextarea(){
   if(bad) showErr(bad+' linha(s) com tamanho diferente de 240 bytes — exibindo mesmo assim (campos podem aparecer deslocados).');
   document.getElementById('fileLabel').innerHTML='arquivo: <b>colado manualmente</b>';
   CURRENT_FILE='arquivo-colado';
+  USE_GENERIC_VALIDATION=false;   // novo conteúdo: re-pergunta se banco não implementado
   render(lines);
 }
 function showErr(m){document.getElementById('errbox').innerHTML='<div class="err">⚠️ '+esc(m)+'</div>';}
@@ -2540,7 +2578,9 @@ function clearAll(){
   document.getElementById('filepick').value='';
   document.getElementById('fileLabel').innerHTML='nenhum arquivo carregado';
   const mh=document.getElementById('modeHint'); if(mh) mh.innerHTML='';
+  const bp=document.getElementById('bankPrompt'); if(bp) bp.innerHTML='';
   DATA=[]; ISSUES=[]; CURRENT_FILE='arquivo';
+  GENERIC_MODE=false; FILE_BANK_CODE=null; USE_GENERIC_VALIDATION=false;
   clearErr();
   showEmptyState();
   document.getElementById('input').focus();
@@ -2556,6 +2596,7 @@ function loadFile(file){
     if(bad) showErr(bad+' linha(s) com tamanho diferente de 240 bytes.');
     document.getElementById('fileLabel').innerHTML='arquivo: <b>'+esc(file.name)+'</b>';
     CURRENT_FILE=file.name;
+    USE_GENERIC_VALIDATION=false;   // novo arquivo: re-pergunta se banco não implementado
     render(lines);
   };
   rd.readAsText(file,'latin1');
@@ -2755,6 +2796,26 @@ function setModeHint(cfg,fileRet){
     msg='ℹ️ Este arquivo parece ser um RETORNO (posição 143 = "2"). Para decodificar as ocorrências do banco, use Ferramentas → Inspecionar Retorno.'; cls='tip';
   }
   el.innerHTML = msg ? `<div class="mode-hint ${cls}">${msg}</div>` : '';
+}
+/* aviso/pergunta quando o banco do arquivo não é implementado */
+function setBankPrompt(){
+  const el=document.getElementById('bankPrompt'); if(!el) return;
+  if(!GENERIC_MODE || !DATA || !DATA.length){ el.innerHTML=''; return; }
+  const cod=esc(FILE_BANK_CODE||'???');
+  if(USE_GENERIC_VALIDATION){
+    el.innerHTML=`<div class="bank-prompt on">✅ Validando o <b>banco ${cod}</b> pelo layout genérico <b>FEBRABAN</b> (banco não implementado). `
+      +`<button class="lnk" onclick="setGenericValidation(false)">voltar a só visualizar</button></div>`;
+  }else{
+    el.innerHTML=`<div class="bank-prompt"><div>⚠️ <b>Banco ${cod} não implementado.</b> O arquivo está sendo exibido pelo layout genérico FEBRABAN, `
+      +`<b>sem validação</b>. Deseja validar seguindo o manual FEBRABAN (genérico)?</div>`
+      +`<div class="bp-actions"><button class="b-primary" onclick="setGenericValidation(true)">Validar pelo FEBRABAN</button>`
+      +`<button class="b-ghost" onclick="setGenericValidation(false)">Só visualizar</button></div></div>`;
+  }
+}
+/* liga/desliga a validação genérica FEBRABAN e re-renderiza */
+function setGenericValidation(v){
+  USE_GENERIC_VALIDATION=v;
+  if(DATA && DATA.length){ const lines=DATA.map(r=>r.line); render(lines); }
 }
 function openBarcodeTool(){closeDrawer();document.getElementById('bcModal').classList.add('open');setTimeout(()=>{const i=document.getElementById('bcInput');if(i)i.focus();},60);}
 function closeBarcodeTool(){document.getElementById('bcModal').classList.remove('open');}
